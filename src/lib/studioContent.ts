@@ -8,13 +8,76 @@ const GALLERY_STORAGE_KEY = 'phoenix_studio_gallery_v1';
 const ARTISTS_UPDATED_EVENT = 'phoenix_studio_artists_updated';
 const GALLERY_UPDATED_EVENT = 'phoenix_studio_gallery_updated';
 
+export async function compressImageFile(file: File, maxDimension: number = 1200, quality: number = 0.82): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          let width = img.width;
+          let height = img.height;
+
+          if (width > maxDimension || height > maxDimension) {
+            if (width > height) {
+              height = Math.round((height * maxDimension) / width);
+              width = maxDimension;
+            } else {
+              width = Math.round((width * maxDimension) / height);
+              height = maxDimension;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(e.target?.result as string);
+            return;
+          }
+
+          ctx.drawImage(img, 0, 0, width, height);
+
+          // Try WebP first, fallback to JPEG
+          let dataUrl = canvas.toDataURL('image/webp', quality);
+          if (!dataUrl.startsWith('data:image/webp')) {
+            dataUrl = canvas.toDataURL('image/jpeg', quality);
+          }
+          resolve(dataUrl);
+        } catch {
+          resolve(e.target?.result as string);
+        }
+      };
+      img.onerror = () => resolve(e.target?.result as string);
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => resolve('');
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Checks whether the 'site_settings' table exists in the connected Supabase project.
+ */
+export async function checkSiteSettingsTableStatus(): Promise<{ exists: boolean; error?: string }> {
+  try {
+    const { error } = await supabase.from('site_settings').select('key').limit(1);
+    if (error) {
+      return { exists: false, error: error.message };
+    }
+    return { exists: true };
+  } catch (err: any) {
+    return { exists: false, error: err?.message || 'Database connection error' };
+  }
+}
+
 /**
  * Direct file upload helper that uploads images directly to Express /api/upload-image
- * and returns the permanent disk URL (e.g. /uploads/logo_123.png).
- * Automatically preserves all uploaded images across code updates, new features, and server restarts.
+ * or compresses them via browser canvas for instant, lightweight cloud sync.
  */
 export async function uploadImageToServer(file: File, type: string = 'image'): Promise<string> {
-  // 1. Try binary streaming upload first (handles files of any size up to 50MB)
+  // 1. Try binary streaming upload first (handles files of any size up to 50MB if backend runs)
   try {
     const res = await fetch(`/api/upload-image?type=${encodeURIComponent(type)}&filename=${encodeURIComponent(file.name)}`, {
       method: 'POST',
@@ -29,35 +92,25 @@ export async function uploadImageToServer(file: File, type: string = 'image'): P
         return data.url;
       }
     }
-  } catch (err) {
-    console.warn('Binary image upload error, trying base64 fallback:', err);
+  } catch {
+    // Static Vercel hosting fallback
   }
 
-  // 2. Base64 fallback through /api/upload-image so server saves to disk
+  // 2. High performance client-side canvas compression: converts 5MB-10MB phone camera photos
+  // into ultra-crisp, lightweight ~60KB-100KB web-ready images that sync instantly to Supabase!
+  try {
+    const compressed = await compressImageFile(file, 1200, 0.82);
+    if (compressed && compressed.length > 50) {
+      return compressed;
+    }
+  } catch (compErr) {
+    console.warn('Canvas compression fallback error:', compErr);
+  }
+
+  // 3. Raw DataUrl fallback
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const dataUrl = e.target?.result as string;
-        if (!dataUrl) {
-          reject(new Error('Failed to read image data'));
-          return;
-        }
-        const res = await fetch('/api/upload-image', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dataUrl, filename: file.name, type }),
-        });
-        const data = await res.json();
-        if (data.success && data.url) {
-          resolve(data.url);
-        } else {
-          resolve(dataUrl);
-        }
-      } catch {
-        resolve(e.target?.result as string);
-      }
-    };
+    reader.onload = (e) => resolve((e.target?.result as string) || '');
     reader.onerror = (err) => reject(err);
     reader.readAsDataURL(file);
   });
@@ -256,7 +309,7 @@ export function getStoredGallery(): GalleryItem[] {
   return GALLERY_ITEMS;
 }
 
-export async function saveGallery(items: GalleryItem[]): Promise<{ success: boolean; error?: string }> {
+export async function saveGallery(items: GalleryItem[]): Promise<{ success: boolean; cloudSynced: boolean; error?: string }> {
   try {
     // 1. Save locally with quota error protection
     try {
@@ -280,8 +333,10 @@ export async function saveGallery(items: GalleryItem[]): Promise<{ success: bool
     }
 
     // 4. Sync to Supabase site_settings
+    let cloudSynced = false;
+    let cloudError: string | undefined;
     try {
-      await supabase
+      const { error } = await supabase
         .from('site_settings')
         .upsert([
           {
@@ -290,13 +345,20 @@ export async function saveGallery(items: GalleryItem[]): Promise<{ success: bool
             updated_at: new Date().toISOString(),
           },
         ]);
-    } catch (err) {
+      if (error) {
+        cloudError = error.message;
+        console.warn('Supabase gallery sync error:', error);
+      } else {
+        cloudSynced = true;
+      }
+    } catch (err: any) {
+      cloudError = err?.message || 'Network error syncing with Supabase';
       console.warn('Supabase gallery sync warning:', err);
     }
 
-    return { success: true };
+    return { success: true, cloudSynced, error: cloudError };
   } catch (err: any) {
-    return { success: false, error: err?.message || 'Failed to save gallery items.' };
+    return { success: false, cloudSynced: false, error: err?.message || 'Failed to save gallery items.' };
   }
 }
 

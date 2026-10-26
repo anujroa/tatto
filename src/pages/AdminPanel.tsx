@@ -202,7 +202,7 @@ export const AdminPanel: React.FC = () => {
   }, [appointments]);
 
   const copySQL = () => {
-    navigator.clipboard.writeText(SUPABASE_SQL_SCHEMA + '\n\n' + ADMIN_SETUP_SQL);
+    navigator.clipboard.writeText(ADMIN_SETUP_SQL);
     setCopiedSQL(true);
     setTimeout(() => setCopiedSQL(false), 2500);
   };
@@ -994,8 +994,6 @@ export const AdminPanel: React.FC = () => {
 
               <div className="relative rounded-xl overflow-hidden border border-zinc-800 bg-black">
                 <pre className="p-4 text-xs font-mono text-zinc-300 overflow-x-auto leading-relaxed">
-                  {SUPABASE_SQL_SCHEMA}
-                  {'\n\n'}
                   {ADMIN_SETUP_SQL}
                 </pre>
               </div>

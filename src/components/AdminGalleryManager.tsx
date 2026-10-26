@@ -15,10 +15,20 @@ import {
   Check, 
   X,
   ExternalLink,
-  ArrowUpDown
+  ArrowUpDown,
+  AlertTriangle,
+  Database
 } from 'lucide-react';
 import { GalleryItem } from '../data/studioData';
-import { getStoredGallery, saveGallery, resetGallery, getStoredArtists, uploadImageToServer } from '../lib/studioContent';
+import { 
+  getStoredGallery, 
+  saveGallery, 
+  resetGallery, 
+  getStoredArtists, 
+  uploadImageToServer,
+  checkSiteSettingsTableStatus 
+} from '../lib/studioContent';
+import { supabase } from '../lib/supabase';
 
 export const AdminGalleryManager: React.FC = () => {
   const [galleryItems, setGalleryItems] = useState<GalleryItem[]>(getStoredGallery);
@@ -28,11 +38,43 @@ export const AdminGalleryManager: React.FC = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+  const [cloudStatus, setCloudStatus] = useState<{ checked: boolean; exists: boolean; error?: string }>({
+    checked: false,
+    exists: false,
+  });
 
-  // Sync latest gallery showcase from server on mount
+  // Sync latest gallery showcase from Supabase cloud database or Express server on mount
   useEffect(() => {
     let isMounted = true;
-    const fetchFreshGallery = async () => {
+    const loadData = async () => {
+      // 1. Check Supabase site_settings table status
+      const status = await checkSiteSettingsTableStatus();
+      if (isMounted) {
+        setCloudStatus({ checked: true, exists: status.exists, error: status.error });
+      }
+
+      // 2. If table exists, load cloud authoritative gallery
+      if (status.exists) {
+        try {
+          const { data, error } = await supabase
+            .from('site_settings')
+            .select('value')
+            .eq('key', 'custom_gallery')
+            .limit(1);
+
+          if (!error && data && data.length > 0 && Array.isArray(data[0].value) && data[0].value.length > 0) {
+            if (isMounted) {
+              setGalleryItems(data[0].value);
+              try {
+                localStorage.setItem('phoenix_studio_gallery_v1', JSON.stringify(data[0].value));
+              } catch {}
+              return;
+            }
+          }
+        } catch {}
+      }
+
+      // 3. Fallback: try Express server
       try {
         const res = await fetch('/api/content/custom_gallery', { cache: 'no-store' });
         if (res.ok) {
@@ -46,7 +88,8 @@ export const AdminGalleryManager: React.FC = () => {
         }
       } catch {}
     };
-    fetchFreshGallery();
+
+    loadData();
     return () => {
       isMounted = false;
     };
@@ -166,10 +209,16 @@ export const AdminGalleryManager: React.FC = () => {
     const res = await saveGallery(galleryItems);
     setIsSaving(false);
 
-    if (res.success) {
-      setStatusMessage('Gallery artworks and details successfully updated across the website!');
+    if (res.success && res.cloudSynced) {
+      setStatusMessage('✅ Gallery successfully updated & synced to Cloud! All visitors on the live website will see your updated photos.');
       setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3500);
+      setCloudStatus({ checked: true, exists: true });
+      setTimeout(() => setSaveSuccess(false), 4500);
+    } else if (res.success && !res.cloudSynced) {
+      setStatusMessage('⚠️ Saved to this browser, but Cloud Database sync failed (' + (res.error || 'table missing') + ').');
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 5000);
+      alert('⚠️ Saved on your device, but NOT visible to other visitors yet!\n\nReason: ' + (res.error || 'Supabase table "site_settings" is missing.') + '\n\nPlease open the "Supabase Backend Config" tab in Admin Panel and run the 10-second SQL script in your Supabase project!');
     } else {
       alert('Error saving gallery: ' + (res.error || 'Unknown error'));
     }
@@ -195,6 +244,52 @@ export const AdminGalleryManager: React.FC = () => {
         onChange={handleImageUpload}
         className="hidden"
       />
+
+      {/* Cloud Sync Status Banner */}
+      {cloudStatus.checked && !cloudStatus.exists && (
+        <div className="bg-amber-950/40 border-2 border-amber-500/50 rounded-2xl p-4 sm:p-5 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 text-xs shadow-xl animate-in fade-in duration-300">
+          <div className="flex items-start gap-3">
+            <span className="p-2 rounded-xl bg-amber-500/20 text-amber-400 shrink-0 mt-0.5">
+              <AlertTriangle className="w-5 h-5 text-amber-400" />
+            </span>
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <h4 className="font-bold text-amber-300 text-sm">
+                  Live Cloud Sync Pending (Supabase `site_settings` Table Missing)
+                </h4>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                  Action Required
+                </span>
+              </div>
+              <p className="text-zinc-300 leading-relaxed max-w-2xl text-[11px]">
+                Your photo updates are currently saved in <strong>this browser only</strong>. For friends &amp; all website visitors to see your photos on the live link, run the 10-second SQL script in your Supabase project.
+              </p>
+            </div>
+          </div>
+          <a
+            href="https://supabase.com/dashboard/project/jkaeilfiqaadmvxgcpjn/sql/new"
+            target="_blank"
+            rel="noreferrer"
+            className="w-full md:w-auto text-center shrink-0 bg-[#FFD60A] hover:bg-yellow-400 text-black font-bold px-4 py-2.5 rounded-xl flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-95 cursor-pointer text-xs"
+          >
+            <span>Open Supabase SQL Editor</span>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </a>
+        </div>
+      )}
+
+      {cloudStatus.checked && cloudStatus.exists && (
+        <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-xl px-4 py-2.5 flex items-center justify-between text-xs text-emerald-300">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-semibold">Live Cloud Database Connected</span>
+            <span className="text-zinc-400 text-[11px]">— Any photo you save updates immediately for all visitors globally.</span>
+          </div>
+          <span className="font-mono text-[10px] text-emerald-400/80 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
+            supabase: site_settings ✅
+          </span>
+        </div>
+      )}
 
       {/* Top Banner */}
       <div className="bg-[#161616] border border-zinc-800 rounded-2xl p-6 flex flex-col md:flex-row md:items-center justify-between gap-4">
